@@ -5,9 +5,11 @@ use btleplug::platform::{Adapter, Manager, Peripheral};
 use rand::{thread_rng, Rng};
 use std::error::Error;
 use std::time::Duration;
-use uuid::Uuid;
+use uuid::{uuid, Uuid};
+use futures::stream::StreamExt;
 
-const CONTROL_CHARACTERISTIC_UUID: Uuid = uuid_from_u16(0xFFE9);
+const CONTROL_CHARACTERISTIC_UUID: Uuid = uuid!("f000fff5-0451-4000-b000-000000000000");
+const NOTIFY_CHARACTERISTIC_UUID: Uuid = uuid!("f000fff4-0451-4000-b000-000000000000");
 use tokio::time;
 
 
@@ -16,7 +18,7 @@ const CRC_TABLE: [u16; 256] = [0, 4129, 8258, 12387, 16516, 20645, 24774, 28903,
 fn compute_crc(data: &[u8]) -> [u8; 2] {
     let mut crc_result: u16 = 0;
     for byte in data.iter() {
-        crc_result = (crc_result << 8) as u16 ^ CRC_TABLE[((crc_result >> 8) ^ (*byte as u16)) as usize];
+        crc_result = (crc_result << 8) ^ CRC_TABLE[((crc_result >> 8) ^ (*byte as u16)) as usize];
     }
     [(crc_result >> 8) as u8, crc_result as u8]
 }
@@ -51,17 +53,13 @@ enum Commands {
 }
 
 impl BtCommand {
-    fn add_crc(raw: &mut[u8; 20]) {
-        let crc = compute_crc(&raw[..17]);
-        raw[18] = crc[0];
-        raw[19] = crc[1];
-    }
 
     fn pack(base: &[u8]) -> [u8; 20] {
         let mut command: [u8; 20] = [255; 20];
         command[0] = 126;
         command[1..1+base.len()].copy_from_slice(&base);
-        BtCommand::add_crc(&mut command);
+        let crc = compute_crc(&command[1..18]);
+        command[18..20].copy_from_slice(&crc);
         command
     }
 
@@ -70,6 +68,8 @@ impl BtCommand {
             Commands::Reset=>&[19, 0],
             Commands::GetBattery=>&[20],
             Commands::GetTime=>&[17],
+            Commands::NewPairing=>&[65, 160, 161],
+            Commands::GetVersion=>&[18],
             _=>panic!("Invalid command type!"),
         };
         BtCommand {
@@ -81,7 +81,74 @@ impl BtCommand {
 fn on_receive() {
 }
 
-fn main() {
-    let command = BtCommand::new(Commands::Reset);
+async fn find_tracker(central: &Adapter) -> Option<Peripheral> {
+    for p in central.peripherals().await.unwrap() {
+        if p.properties()
+            .await
+            .unwrap()
+            .unwrap()
+            .local_name
+            .iter()
+            .any(|name| name.contains("DSB012"))
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+
+    //println!("{:?}", compute_crc(&[20, 255]));
+
+    let command = BtCommand::new(Commands::GetTime);
     println!("{:?}", command.bytes);
+
+
+    let manager = Manager::new().await.unwrap();
+
+    let central = manager
+        .adapters()
+        .await
+        .expect("Unable to fetch adapter list.")
+        .into_iter()
+        .nth(0)
+        .expect("Unable to find adapters.");
+
+    central.start_scan(ScanFilter::default()).await?;
+    time::sleep(Duration::from_secs(2)).await;
+
+    let tracker = find_tracker(&central).await.expect("No trackers found");
+
+    tracker.connect().await?;
+
+    tracker.discover_services().await?;
+
+    let chars = tracker.characteristics();
+    let tx_char = chars
+        .iter()
+        .find(|c| c.uuid == CONTROL_CHARACTERISTIC_UUID)
+        .expect("Unable to find tx characteric");
+
+    let rx_char = chars
+        .iter()
+        .find(|c| c.uuid == NOTIFY_CHARACTERISTIC_UUID)
+        .expect("Unable to find rx characteric");
+
+    tracker.subscribe(&rx_char).await?;
+
+    let mut stream = tracker.notifications().await?;
+
+    println!("Connected!");
+
+    tracker.write(&tx_char, &command.bytes, WriteType::WithResponse).await?;
+
+    println!("Sent command");
+
+    let data = stream.next().await.unwrap();
+    println!("{:?}", data.value);
+    
+
+    Ok(())
 }
