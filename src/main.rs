@@ -266,13 +266,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("i {:?}", data.value);
         let data_info = parse_data_info(&data.value).await;
 
-        if data_info.DataStart != 0 || data_info.DataEnd != 1 {
+        if data_info.DataStart != 0 || data_info.DataEnd > data_info.FlashSize {
             panic!("Unsupported data ranges! start: {:?} end: {:?}", data_info.DataStart, data_info.DataEnd);
         }
 
         tx.send(TaskMsg::StateChange(State::Receiving)).await.unwrap();
 
-        let block_count = data_info.FlashSize;
+        let block_count = data_info.DataEnd;
 
         let mut flash = Vec::new(); 
         for block_index in 0..block_count {
@@ -288,19 +288,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             flash.extend(parse_block(&block).await.iter().copied());
         };
 
-        tracker.write(&tx_char, &gen_data_finish_command(data_info.DataStart, data_info.DataEnd), WriteType::WithResponse).await.unwrap();
-
-        let data = stream.next().await.unwrap();
-        let response = parse_response(&data.value).await;
-
-        if response != Response::DataFinishOk || data.value[2] != 1 {
-            panic!("Data finish failed!");
-        };
-
-        tx.send(TaskMsg::StateChange(State::Ready)).await.unwrap();
-
         let mut file = File::create("flash.bin").unwrap();
         file.write_all(&flash);
+
+        //tracker.write(&tx_char, &gen_data_finish_command(data_info.DataStart, data_info.DataEnd), WriteType::WithResponse).await.unwrap();
+
+        //let data = stream.next().await.unwrap();
+        //let response = parse_response(&data.value).await;
+
+        //if response != Response::DataFinishOk || data.value[2] != 1 {
+        //    panic!("Data finish failed!");
+        //};
+
+        tx.send(TaskMsg::StateChange(State::Ready)).await.unwrap();
+        
+        //tracker.write(&tx_char, &pack_command(&[34]), WriteType::WithResponse).await.unwrap();
+
+        //while let Some(packet) = stream.next().await {
+        //    println!("d {:?}", packet.value);
+        //}
     });
 
     while let Some(message) = rx.recv().await {
@@ -321,3 +327,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// 17
+// 18
+// 20
